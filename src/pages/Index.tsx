@@ -182,6 +182,8 @@ export default function Index() {
   const [showEpgInput, setShowEpgInput] = useState(false);
   const [epgSelectedChannel, setEpgSelectedChannel] = useState<string | null>(null);
   const [epgNow, setEpgNow] = useState(() => new Date());
+  const [epgSearch, setEpgSearch] = useState("");
+  const [epgSearchMode, setEpgSearchMode] = useState(false);
 
   // Обновляем текущее время каждую минуту для EPG
   useEffect(() => {
@@ -456,6 +458,33 @@ export default function Index() {
     if (!epgId) return null;
     return epgData.programs.find(p => p.channelId === epgId && isCurrentProgram(p)) ?? null;
   }, [epgData, getEpgIdForChannel, isCurrentProgram]);
+
+  // ── EPG search ───────────────────────────────────────────────────────────────
+  const epgSearchResults = useCallback((): Array<{ program: EpgProgram; channel: EpgChannel }> => {
+    if (!epgData || !epgSearch.trim()) return [];
+    const q = epgSearch.toLowerCase();
+    const results: Array<{ program: EpgProgram; channel: EpgChannel }> = [];
+    const chMap = new Map(epgData.channels.map(c => [c.id, c]));
+    const todayStart = new Date(epgNow); todayStart.setHours(0,0,0,0);
+    const todayEnd = new Date(epgNow); todayEnd.setHours(23,59,59,999);
+    for (const p of epgData.programs) {
+      if (p.stop < todayStart || p.start > todayEnd) continue;
+      if (
+        p.title.toLowerCase().includes(q) ||
+        (p.desc && p.desc.toLowerCase().includes(q)) ||
+        (p.category && p.category.toLowerCase().includes(q))
+      ) {
+        const ch = chMap.get(p.channelId);
+        if (ch) results.push({ program: p, channel: ch });
+      }
+    }
+    return results.sort((a, b) => {
+      const aActive = isCurrentProgram(a.program) ? -1 : 1;
+      const bActive = isCurrentProgram(b.program) ? -1 : 1;
+      if (aActive !== bActive) return aActive - bActive;
+      return a.program.start.getTime() - b.program.start.getTime();
+    }).slice(0, 50);
+  }, [epgData, epgSearch, epgNow, isCurrentProgram]);
 
   // ── Filtered list ─────────────────────────────────────────────────────────────
   const displayChannels =
@@ -935,49 +964,169 @@ export default function Index() {
                 {/* EPG loaded */}
                 {epgData && (
                   <div className="flex flex-col h-full">
-                    {/* Header with channel selector and reload */}
+                    {/* Header */}
                     <div className="px-3 py-2 shrink-0 space-y-2">
                       <div className="flex items-center justify-between">
                         <div>
                           <p className="text-xs font-semibold" style={{ color: "#00d4ff" }}>
-                            {new Date().toLocaleDateString("ru-RU", { weekday: "short", day: "numeric", month: "short" })}
+                            {epgNow.toLocaleDateString("ru-RU", { weekday: "short", day: "numeric", month: "short" })}
                           </p>
                           <p className="text-[10px] text-muted-foreground/50">{epgData.channels.length} каналов · {epgData.programs.length} передач</p>
                         </div>
                         <div className="flex gap-1.5">
+                          <button onClick={() => { setEpgSearchMode(s => !s); setEpgSearch(""); }}
+                            className="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-white/8 transition-colors"
+                            style={{ border: `1px solid ${epgSearchMode ? "rgba(0,212,255,0.4)" : "rgba(255,255,255,0.08)"}`, background: epgSearchMode ? "rgba(0,212,255,0.1)" : "transparent" }}>
+                            <Icon name="Search" size={12} style={{ color: epgSearchMode ? "#00d4ff" : undefined }} className={epgSearchMode ? "" : "text-muted-foreground"} />
+                          </button>
                           <button onClick={() => setShowEpgInput(true)}
                             className="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-white/8 transition-colors"
                             style={{ border: "1px solid rgba(255,255,255,0.08)" }}>
                             <Icon name="RefreshCw" size={12} className="text-muted-foreground" />
                           </button>
-                          <button onClick={() => { setEpgData(null); setEpgUrl(""); setEpgSelectedChannel(null); }}
+                          <button onClick={() => { setEpgData(null); setEpgUrl(""); setEpgSelectedChannel(null); setEpgSearch(""); setEpgSearchMode(false); }}
                             className="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-white/8 transition-colors"
                             style={{ border: "1px solid rgba(255,255,255,0.08)" }}>
                             <Icon name="Trash2" size={12} className="text-red-400/60" />
                           </button>
                         </div>
                       </div>
-                      {/* Channel picker */}
-                      <div className="overflow-x-auto pb-1" style={{ scrollbarWidth: "none" }}>
-                        <div className="flex gap-1.5 w-max">
-                          {epgData.channels.slice(0, 30).map((ch) => (
-                            <button key={ch.id} onClick={() => setEpgSelectedChannel(ch.id)}
-                              className="px-2.5 py-1 rounded-lg text-xs font-medium transition-all whitespace-nowrap shrink-0"
-                              style={{
-                                background: epgSelectedChannel === ch.id ? "rgba(0,212,255,0.15)" : "rgba(255,255,255,0.04)",
-                                border: `1px solid ${epgSelectedChannel === ch.id ? "rgba(0,212,255,0.4)" : "rgba(255,255,255,0.07)"}`,
-                                color: epgSelectedChannel === ch.id ? "#00d4ff" : "rgba(255,255,255,0.5)",
-                              }}>
-                              {ch.name}
-                            </button>
-                          ))}
+
+                      {/* Search input */}
+                      {epgSearchMode && (
+                        <div className="animate-fade-in">
+                          <div className="flex items-center gap-2 px-3 py-2 rounded-xl"
+                            style={{ background: "rgba(0,212,255,0.06)", border: "1px solid rgba(0,212,255,0.2)" }}>
+                            <Icon name="Search" size={13} style={{ color: "#00d4ff" }} className="shrink-0" />
+                            <input
+                              autoFocus
+                              value={epgSearch}
+                              onChange={(e) => setEpgSearch(e.target.value)}
+                              placeholder="Название, жанр, описание..."
+                              className="flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground/40"
+                              style={{ color: "rgba(255,255,255,0.85)" }}
+                            />
+                            {epgSearch && (
+                              <button onClick={() => setEpgSearch("")}>
+                                <Icon name="X" size={12} className="text-muted-foreground" />
+                              </button>
+                            )}
+                          </div>
+                          {epgSearch && (
+                            <p className="text-[10px] text-muted-foreground/40 mt-1 px-1">
+                              {epgSearchResults().length > 0 ? `${epgSearchResults().length} результатов` : "Ничего не найдено"}
+                            </p>
+                          )}
                         </div>
-                      </div>
+                      )}
+
+                      {/* Channel picker — hide in search mode */}
+                      {!epgSearchMode && (
+                        <div className="overflow-x-auto pb-1" style={{ scrollbarWidth: "none" }}>
+                          <div className="flex gap-1.5 w-max">
+                            {epgData.channels.slice(0, 30).map((ch) => (
+                              <button key={ch.id} onClick={() => setEpgSelectedChannel(ch.id)}
+                                className="px-2.5 py-1 rounded-lg text-xs font-medium transition-all whitespace-nowrap shrink-0"
+                                style={{
+                                  background: epgSelectedChannel === ch.id ? "rgba(0,212,255,0.15)" : "rgba(255,255,255,0.04)",
+                                  border: `1px solid ${epgSelectedChannel === ch.id ? "rgba(0,212,255,0.4)" : "rgba(255,255,255,0.07)"}`,
+                                  color: epgSelectedChannel === ch.id ? "#00d4ff" : "rgba(255,255,255,0.5)",
+                                }}>
+                                {ch.name}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
 
-                    {/* Programs list */}
+                    {/* Programs list / Search results */}
                     <div className="flex-1 overflow-y-auto px-3 pb-4 space-y-1.5">
-                      {epgSelectedChannel
+
+                      {/* ── Search results ── */}
+                      {epgSearchMode && epgSearch.trim() ? (
+                        epgSearchResults().length === 0 ? (
+                          <div className="flex flex-col items-center justify-center py-12 gap-3">
+                            <Icon name="SearchX" size={26} className="text-muted-foreground/25" />
+                            <p className="text-muted-foreground/40 text-xs text-center leading-relaxed">
+                              Передачи не найдены<br />
+                              <span className="text-muted-foreground/25">Попробуйте другое слово</span>
+                            </p>
+                          </div>
+                        ) : epgSearchResults().map(({ program: prog, channel: ch }) => {
+                          const isCurrent = isCurrentProgram(prog);
+                          const isPast = prog.stop < epgNow;
+                          const q = epgSearch.toLowerCase();
+                          const highlight = (text: string) => {
+                            const idx = text.toLowerCase().indexOf(q);
+                            if (idx === -1) return <span>{text}</span>;
+                            return <>
+                              {text.slice(0, idx)}
+                              <mark style={{ background: "rgba(0,212,255,0.25)", color: "#00d4ff", borderRadius: 2, padding: "0 1px" }}>
+                                {text.slice(idx, idx + q.length)}
+                              </mark>
+                              {text.slice(idx + q.length)}
+                            </>;
+                          };
+                          return (
+                            <div key={prog.id} className="rounded-xl overflow-hidden transition-all"
+                              style={{
+                                background: isCurrent ? "rgba(0,212,255,0.07)" : "rgba(255,255,255,0.03)",
+                                border: `1px solid ${isCurrent ? "rgba(0,212,255,0.2)" : "rgba(255,255,255,0.06)"}`,
+                                opacity: isPast ? 0.55 : 1,
+                              }}>
+                              <div className="px-3 py-2.5">
+                                {/* Channel name */}
+                                <div className="flex items-center gap-1.5 mb-1.5">
+                                  <div className="w-1 h-1 rounded-full shrink-0" style={{ background: "#9b59ff" }} />
+                                  <span className="text-[10px] font-semibold font-rajdhani tracking-wider truncate"
+                                    style={{ color: "#9b59ff" }}>{ch.name}</span>
+                                  {isCurrent && (
+                                    <span className="ml-auto flex items-center gap-1 text-[10px] font-rajdhani shrink-0"
+                                      style={{ color: "#00d4ff" }}>
+                                      <span className="w-1 h-1 rounded-full live-badge" style={{ background: "#00d4ff" }} />
+                                      сейчас
+                                    </span>
+                                  )}
+                                </div>
+                                <p className="text-sm font-medium truncate text-white/90 mb-0.5">
+                                  {highlight(prog.title)}
+                                </p>
+                                {prog.category && (
+                                  <span className="inline-block text-[10px] px-1.5 py-0.5 rounded font-medium mb-1"
+                                    style={{ background: "rgba(155,89,255,0.12)", color: "rgba(155,89,255,0.8)" }}>
+                                    {highlight(prog.category)}
+                                  </span>
+                                )}
+                                {prog.desc && (
+                                  <p className="text-[11px] text-muted-foreground/50 line-clamp-2 leading-relaxed">
+                                    {highlight(prog.desc)}
+                                  </p>
+                                )}
+                                <p className="text-[10px] text-muted-foreground/40 font-rajdhani mt-1.5">
+                                  {formatEpgTime(prog.start)} — {formatEpgTime(prog.stop)}
+                                </p>
+                                {isCurrent && (
+                                  <div className="mt-2 h-0.5 rounded-full overflow-hidden"
+                                    style={{ background: "rgba(0,212,255,0.1)" }}>
+                                    <div className="h-full rounded-full"
+                                      style={{ width: `${getProgramProgress(prog)}%`, background: "linear-gradient(90deg, #00d4ff, #9b59ff)" }} />
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })
+                      ) : epgSearchMode ? (
+                        <div className="flex flex-col items-center justify-center py-12 gap-3">
+                          <Icon name="Search" size={26} className="text-muted-foreground/20" />
+                          <p className="text-muted-foreground/35 text-xs text-center leading-relaxed">
+                            Введите название передачи,<br />жанр или ключевое слово
+                          </p>
+                        </div>
+
+                      /* ── Channel programs ── */
+                      ) : epgSelectedChannel
                         ? getChannelPrograms(epgSelectedChannel).length === 0
                           ? (
                             <div className="flex flex-col items-center justify-center py-10 gap-2">
