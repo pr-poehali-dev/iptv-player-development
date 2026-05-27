@@ -181,7 +181,13 @@ export default function Index() {
   const [epgError, setEpgError] = useState("");
   const [showEpgInput, setShowEpgInput] = useState(false);
   const [epgSelectedChannel, setEpgSelectedChannel] = useState<string | null>(null);
-  const [epgNow] = useState(() => new Date());
+  const [epgNow, setEpgNow] = useState(() => new Date());
+
+  // Обновляем текущее время каждую минуту для EPG
+  useEffect(() => {
+    const t = setInterval(() => setEpgNow(new Date()), 60_000);
+    return () => clearInterval(t);
+  }, []);
 
   // ── HLS loader ──────────────────────────────────────────────────────────────
   const tryHls = useCallback((url: string, video: HTMLVideoElement) => {
@@ -427,6 +433,30 @@ export default function Index() {
     return Math.min(100, Math.max(0, (elapsed / total) * 100));
   };
 
+  // ── EPG ↔ Channel matching ────────────────────────────────────────────────────
+  const getEpgIdForChannel = useCallback((ch: Channel): string | null => {
+    if (!epgData) return null;
+    // 1. Exact match by tvg-id stored in channel.id (from m3u tvg-id)
+    if (epgData.channels.find(e => e.id === ch.id)) return ch.id;
+    // 2. Fuzzy name match — normalize both sides
+    const normalize = (s: string) => s.toLowerCase().replace(/[^a-zа-яё0-9]/gi, "");
+    const chNorm = normalize(ch.name);
+    const match = epgData.channels.find(e => normalize(e.name) === chNorm);
+    if (match) return match.id;
+    // 3. Partial match
+    const partial = epgData.channels.find(e =>
+      normalize(e.name).includes(chNorm) || chNorm.includes(normalize(e.name))
+    );
+    return partial?.id ?? null;
+  }, [epgData]);
+
+  const getNowPlaying = useCallback((ch: Channel): EpgProgram | null => {
+    if (!epgData) return null;
+    const epgId = getEpgIdForChannel(ch);
+    if (!epgId) return null;
+    return epgData.programs.find(p => p.channelId === epgId && isCurrentProgram(p)) ?? null;
+  }, [epgData, getEpgIdForChannel, isCurrentProgram]);
+
   // ── Filtered list ─────────────────────────────────────────────────────────────
   const displayChannels =
     tab === "favorites"
@@ -622,25 +652,110 @@ export default function Index() {
           </div>
 
           {/* Channel info strip */}
-          {activeChannel && (
-            <div className="glass border-t border-white/5 px-4 py-3 flex items-center gap-3 animate-fade-in shrink-0">
-              <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 overflow-hidden"
-                style={{ background: "rgba(0,212,255,0.08)", border: "1px solid rgba(0,212,255,0.2)" }}>
-                {activeChannel.logo
-                  ? <img src={activeChannel.logo} alt="" className="w-full h-full object-contain" onError={(e) => ((e.target as HTMLImageElement).style.display = "none")} />
-                  : <Icon name="Tv2" size={18} style={{ color: "#00d4ff" }} />}
+          {activeChannel && (() => {
+            const nowPlaying = getNowPlaying(activeChannel);
+            const progress = nowPlaying ? getProgramProgress(nowPlaying) : 0;
+            const nextProgram = nowPlaying && epgData
+              ? epgData.programs
+                  .filter(p => p.channelId === (getEpgIdForChannel(activeChannel) ?? "") && p.start >= nowPlaying.stop)
+                  .sort((a, b) => a.start.getTime() - b.start.getTime())[0]
+              : null;
+            return (
+              <div className="glass border-t border-white/5 px-4 py-3 flex flex-col gap-2.5 animate-fade-in shrink-0">
+                {/* Top row: logo + name + live badge */}
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 overflow-hidden"
+                    style={{ background: "rgba(0,212,255,0.08)", border: "1px solid rgba(0,212,255,0.2)" }}>
+                    {activeChannel.logo
+                      ? <img src={activeChannel.logo} alt="" className="w-full h-full object-contain" onError={(e) => ((e.target as HTMLImageElement).style.display = "none")} />
+                      : <Icon name="Tv2" size={18} style={{ color: "#00d4ff" }} />}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-semibold text-sm truncate text-white/90">{activeChannel.name}</p>
+                    <p className="text-xs text-muted-foreground">{activeChannel.group}</p>
+                  </div>
+                  <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs shrink-0"
+                    style={{ background: "rgba(0,255,136,0.08)", border: "1px solid rgba(0,255,136,0.2)" }}>
+                    <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: "#00ff88", boxShadow: "0 0 5px #00ff88" }} />
+                    <span style={{ color: "#00ff88" }} className="font-rajdhani tracking-wider text-[10px] font-semibold">ЭФИР</span>
+                  </div>
+                </div>
+
+                {/* Now playing EPG block */}
+                {nowPlaying && (
+                  <div className="rounded-xl overflow-hidden animate-fade-in"
+                    style={{ background: "rgba(0,212,255,0.05)", border: "1px solid rgba(0,212,255,0.15)" }}>
+                    <div className="px-3 py-2.5">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1.5 mb-0.5">
+                            <span className="w-1.5 h-1.5 rounded-full shrink-0 live-badge"
+                              style={{ background: "#00d4ff", boxShadow: "0 0 5px #00d4ff" }} />
+                            <p className="text-sm font-semibold truncate text-white/95">{nowPlaying.title}</p>
+                          </div>
+                          {nowPlaying.category && (
+                            <span className="inline-block text-[10px] px-1.5 py-0.5 rounded font-medium"
+                              style={{ background: "rgba(155,89,255,0.15)", color: "rgba(155,89,255,0.9)" }}>
+                              {nowPlaying.category}
+                            </span>
+                          )}
+                          {nowPlaying.desc && (
+                            <p className="text-[11px] text-muted-foreground/60 mt-1 line-clamp-2 leading-relaxed">
+                              {nowPlaying.desc}
+                            </p>
+                          )}
+                        </div>
+                        <div className="text-right shrink-0">
+                          <p className="text-xs font-rajdhani font-bold" style={{ color: "#00d4ff" }}>
+                            {formatEpgTime(nowPlaying.start)}
+                          </p>
+                          <p className="text-[10px] text-muted-foreground/50 font-rajdhani">
+                            до {formatEpgTime(nowPlaying.stop)}
+                          </p>
+                        </div>
+                      </div>
+                      {/* Progress bar */}
+                      <div className="mt-2.5 h-1 rounded-full overflow-hidden"
+                        style={{ background: "rgba(0,212,255,0.1)" }}>
+                        <div className="h-full rounded-full"
+                          style={{ width: `${progress}%`, background: "linear-gradient(90deg, #00d4ff, #9b59ff)", boxShadow: "0 0 6px rgba(0,212,255,0.6)", transition: "width 0.5s linear" }} />
+                      </div>
+                    </div>
+                    {/* Next program */}
+                    {nextProgram && (
+                      <div className="px-3 py-2 border-t"
+                        style={{ borderColor: "rgba(0,212,255,0.1)", background: "rgba(0,0,0,0.15)" }}>
+                        <div className="flex items-center gap-2">
+                          <Icon name="ChevronRight" size={11} className="text-muted-foreground/40 shrink-0" />
+                          <span className="text-[11px] text-muted-foreground/50 font-rajdhani font-semibold mr-1">
+                            {formatEpgTime(nextProgram.start)}
+                          </span>
+                          <span className="text-[11px] text-white/40 truncate">{nextProgram.title}</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* No EPG hint */}
+                {!nowPlaying && epgData && (
+                  <p className="text-[11px] text-muted-foreground/30 text-center py-0.5">
+                    Программа для этого канала не найдена в EPG
+                  </p>
+                )}
+                {!epgData && (
+                  <button onClick={() => setTab("epg")}
+                    className="flex items-center gap-1.5 text-[11px] transition-colors self-start"
+                    style={{ color: "rgba(0,212,255,0.4)" }}
+                    onMouseEnter={(e) => (e.currentTarget.style.color = "#00d4ff")}
+                    onMouseLeave={(e) => (e.currentTarget.style.color = "rgba(0,212,255,0.4)")}>
+                    <Icon name="CalendarDays" size={12} />
+                    Добавить программу передач (EPG)
+                  </button>
+                )}
               </div>
-              <div className="flex-1 min-w-0">
-                <p className="font-semibold text-sm truncate text-white/90">{activeChannel.name}</p>
-                <p className="text-xs text-muted-foreground">{activeChannel.group}</p>
-              </div>
-              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs shrink-0"
-                style={{ background: "rgba(0,255,136,0.08)", border: "1px solid rgba(0,255,136,0.2)" }}>
-                <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: "#00ff88", boxShadow: "0 0 5px #00ff88" }} />
-                <span style={{ color: "#00ff88" }} className="font-rajdhani tracking-wider text-[10px] font-semibold">ЭФИР</span>
-              </div>
-            </div>
-          )}
+            );
+          })()}
         </div>
 
         {/* ─── Sidebar ─── */}
