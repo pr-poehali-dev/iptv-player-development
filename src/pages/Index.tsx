@@ -20,7 +20,78 @@ interface Playlist {
   addedAt: Date;
 }
 
-type TabType = "channels" | "playlists" | "favorites";
+type TabType = "channels" | "playlists" | "favorites" | "epg";
+
+// ─── EPG Types ────────────────────────────────────────────────────────────────
+
+interface EpgProgram {
+  id: string;
+  channelId: string;
+  title: string;
+  desc?: string;
+  start: Date;
+  stop: Date;
+  category?: string;
+}
+
+interface EpgChannel {
+  id: string;
+  name: string;
+  icon?: string;
+}
+
+interface EpgData {
+  channels: EpgChannel[];
+  programs: EpgProgram[];
+  loadedAt: Date;
+}
+
+// ─── XMLTV Parser ─────────────────────────────────────────────────────────────
+
+function parseXmltvDate(raw: string): Date {
+  // format: 20240101120000 +0300
+  const s = raw.trim();
+  const y = s.slice(0,4), mo = s.slice(4,6), d = s.slice(6,8);
+  const h = s.slice(8,10), mi = s.slice(10,12), sec = s.slice(12,14);
+  const tz = s.slice(15) || "+0000";
+  return new Date(`${y}-${mo}-${d}T${h}:${mi}:${sec}${tz}`);
+}
+
+function parseXMLTV(xml: string): EpgData {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(xml, "application/xml");
+  const channels: EpgChannel[] = [];
+  const programs: EpgProgram[] = [];
+
+  doc.querySelectorAll("channel").forEach((ch) => {
+    const id = ch.getAttribute("id") || "";
+    const name = ch.querySelector("display-name")?.textContent || id;
+    const icon = ch.querySelector("icon")?.getAttribute("src") || undefined;
+    channels.push({ id, name, icon });
+  });
+
+  doc.querySelectorAll("programme").forEach((p, i) => {
+    const channelId = p.getAttribute("channel") || "";
+    const startRaw = p.getAttribute("start") || "";
+    const stopRaw = p.getAttribute("stop") || "";
+    const title = p.querySelector("title")?.textContent || "Без названия";
+    const desc = p.querySelector("desc")?.textContent || undefined;
+    const category = p.querySelector("category")?.textContent || undefined;
+    try {
+      programs.push({
+        id: `prg_${i}`,
+        channelId,
+        title,
+        desc,
+        category,
+        start: parseXmltvDate(startRaw),
+        stop: parseXmltvDate(stopRaw),
+      });
+    } catch { /* skip bad entries */ }
+  });
+
+  return { channels, programs, loadedAt: new Date() };
+}
 
 // ─── M3U Parser ──────────────────────────────────────────────────────────────
 
@@ -102,6 +173,15 @@ export default function Index() {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [showVolumeSlider, setShowVolumeSlider] = useState(false);
+
+  // ── EPG state ────────────────────────────────────────────────────────────────
+  const [epgData, setEpgData] = useState<EpgData | null>(null);
+  const [epgUrl, setEpgUrl] = useState("");
+  const [isLoadingEpg, setIsLoadingEpg] = useState(false);
+  const [epgError, setEpgError] = useState("");
+  const [showEpgInput, setShowEpgInput] = useState(false);
+  const [epgSelectedChannel, setEpgSelectedChannel] = useState<string | null>(null);
+  const [epgNow] = useState(() => new Date());
 
   // ── HLS loader ──────────────────────────────────────────────────────────────
   const tryHls = useCallback((url: string, video: HTMLVideoElement) => {
@@ -301,6 +381,50 @@ export default function Index() {
     const ids = new Set(pl.channels.map((c) => c.id));
     setPlaylists((prev) => prev.filter((p) => p.id !== id));
     setAllChannels((prev) => prev.filter((c) => !ids.has(c.id) || DEMO_CHANNELS.find(d => d.id === c.id)));
+  };
+
+  // ── EPG loader ───────────────────────────────────────────────────────────────
+  const loadEpg = async () => {
+    if (!epgUrl.trim()) { setEpgError("Введите URL EPG"); return; }
+    setIsLoadingEpg(true); setEpgError("");
+    try {
+      const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(epgUrl)}`;
+      const res = await fetch(proxyUrl);
+      if (!res.ok) throw new Error("Ошибка загрузки");
+      const text = await res.text();
+      if (!text.includes("<tv") && !text.includes("<programme")) throw new Error("Не является XMLTV файлом");
+      const data = parseXMLTV(text);
+      if (data.programs.length === 0) throw new Error("Программы не найдены");
+      setEpgData(data);
+      setShowEpgInput(false);
+      if (data.channels.length > 0) setEpgSelectedChannel(data.channels[0].id);
+    } catch (err: any) {
+      setEpgError(err.message || "Не удалось загрузить EPG");
+    } finally {
+      setIsLoadingEpg(false);
+    }
+  };
+
+  const getChannelPrograms = (channelId: string): EpgProgram[] => {
+    if (!epgData) return [];
+    const now = epgNow;
+    const todayStart = new Date(now); todayStart.setHours(0,0,0,0);
+    const todayEnd = new Date(now); todayEnd.setHours(23,59,59,999);
+    return epgData.programs
+      .filter(p => p.channelId === channelId && p.stop >= todayStart && p.start <= todayEnd)
+      .sort((a, b) => a.start.getTime() - b.start.getTime());
+  };
+
+  const isCurrentProgram = (p: EpgProgram) => p.start <= epgNow && p.stop >= epgNow;
+
+  const formatEpgTime = (d: Date) =>
+    d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+
+  const getProgramProgress = (p: EpgProgram): number => {
+    if (!isCurrentProgram(p)) return 0;
+    const total = p.stop.getTime() - p.start.getTime();
+    const elapsed = epgNow.getTime() - p.start.getTime();
+    return Math.min(100, Math.max(0, (elapsed / total) * 100));
   };
 
   // ── Filtered list ─────────────────────────────────────────────────────────────
@@ -529,6 +653,7 @@ export default function Index() {
               { key: "channels" as TabType, icon: "List", label: "Каналы" },
               { key: "favorites" as TabType, icon: "Heart", label: "Избранное" },
               { key: "playlists" as TabType, icon: "FolderOpen", label: "Листы" },
+              { key: "epg" as TabType, icon: "CalendarDays", label: "EPG" },
             ]).map(({ key, icon, label }) => (
               <button key={key} onClick={() => setTab(key)}
                 className="flex-1 flex flex-col items-center py-3 gap-1 text-[11px] font-semibold transition-all relative"
@@ -627,6 +752,188 @@ export default function Index() {
                       ))}
                     </div>
                   ))
+                )}
+              </div>
+            )}
+
+            {/* EPG */}
+            {tab === "epg" && (
+              <div className="flex flex-col h-full">
+                {/* No EPG loaded */}
+                {!epgData && !showEpgInput && (
+                  <div className="flex flex-col items-center justify-center py-12 gap-4 px-4">
+                    <div className="w-16 h-16 rounded-2xl flex items-center justify-center"
+                      style={{ background: "rgba(0,212,255,0.06)", border: "1px solid rgba(0,212,255,0.15)" }}>
+                      <Icon name="CalendarDays" size={28} style={{ color: "rgba(0,212,255,0.5)" }} />
+                    </div>
+                    <div className="text-center space-y-1">
+                      <p className="text-white/60 text-sm font-medium">Программа передач</p>
+                      <p className="text-white/25 text-xs leading-relaxed">Загрузите XMLTV файл для просмотра расписания</p>
+                    </div>
+                    <button onClick={() => setShowEpgInput(true)}
+                      className="neon-glow-btn text-white text-sm font-semibold px-4 py-2.5 rounded-xl flex items-center gap-2">
+                      <Icon name="Plus" size={15} />
+                      Добавить EPG
+                    </button>
+                  </div>
+                )}
+
+                {/* EPG URL input */}
+                {showEpgInput && (
+                  <div className="p-4 space-y-3 animate-fade-in">
+                    <div className="flex items-center justify-between mb-1">
+                      <p className="text-sm font-semibold" style={{ color: "#00d4ff" }}>Загрузить EPG</p>
+                      <button onClick={() => { setShowEpgInput(false); setEpgError(""); }}
+                        className="text-muted-foreground hover:text-white transition-colors">
+                        <Icon name="X" size={14} />
+                      </button>
+                    </div>
+                    <p className="text-xs text-muted-foreground/60">Вставьте ссылку на XMLTV (.xml / .gz)</p>
+                    <input value={epgUrl} onChange={(e) => setEpgUrl(e.target.value)}
+                      placeholder="https://example.com/epg.xml"
+                      className="w-full px-3 py-2.5 rounded-xl text-sm outline-none text-white/90 placeholder:text-muted-foreground/40 transition-all"
+                      style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)" }}
+                      onFocus={(e) => { e.currentTarget.style.borderColor = "rgba(0,212,255,0.4)"; }}
+                      onBlur={(e) => { e.currentTarget.style.borderColor = "rgba(255,255,255,0.08)"; }}
+                      onKeyDown={(e) => e.key === "Enter" && loadEpg()} />
+                    {epgError && (
+                      <div className="flex items-center gap-2 p-2.5 rounded-lg text-xs"
+                        style={{ background: "rgba(255,50,50,0.08)", border: "1px solid rgba(255,50,50,0.2)" }}>
+                        <Icon name="AlertCircle" size={13} className="text-red-400 shrink-0" />
+                        <span className="text-red-400/90">{epgError}</span>
+                      </div>
+                    )}
+                    <button onClick={loadEpg} disabled={isLoadingEpg || !epgUrl.trim()}
+                      className="w-full py-2.5 rounded-xl font-bold text-sm font-rajdhani tracking-wider uppercase transition-all disabled:opacity-40"
+                      style={{ background: "linear-gradient(135deg, #00d4ff, #9b59ff)", color: "white", boxShadow: "0 0 20px rgba(0,212,255,0.3)" }}>
+                      {isLoadingEpg
+                        ? <span className="flex items-center justify-center gap-2">
+                            <span className="w-3.5 h-3.5 rounded-full border-2 border-white/20" style={{ borderTopColor: "white", animation: "spin 0.75s linear infinite" }} />
+                            Загружаю...
+                          </span>
+                        : "Загрузить"
+                      }
+                    </button>
+                  </div>
+                )}
+
+                {/* EPG loaded */}
+                {epgData && (
+                  <div className="flex flex-col h-full">
+                    {/* Header with channel selector and reload */}
+                    <div className="px-3 py-2 shrink-0 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className="text-xs font-semibold" style={{ color: "#00d4ff" }}>
+                            {new Date().toLocaleDateString("ru-RU", { weekday: "short", day: "numeric", month: "short" })}
+                          </p>
+                          <p className="text-[10px] text-muted-foreground/50">{epgData.channels.length} каналов · {epgData.programs.length} передач</p>
+                        </div>
+                        <div className="flex gap-1.5">
+                          <button onClick={() => setShowEpgInput(true)}
+                            className="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-white/8 transition-colors"
+                            style={{ border: "1px solid rgba(255,255,255,0.08)" }}>
+                            <Icon name="RefreshCw" size={12} className="text-muted-foreground" />
+                          </button>
+                          <button onClick={() => { setEpgData(null); setEpgUrl(""); setEpgSelectedChannel(null); }}
+                            className="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-white/8 transition-colors"
+                            style={{ border: "1px solid rgba(255,255,255,0.08)" }}>
+                            <Icon name="Trash2" size={12} className="text-red-400/60" />
+                          </button>
+                        </div>
+                      </div>
+                      {/* Channel picker */}
+                      <div className="overflow-x-auto pb-1" style={{ scrollbarWidth: "none" }}>
+                        <div className="flex gap-1.5 w-max">
+                          {epgData.channels.slice(0, 30).map((ch) => (
+                            <button key={ch.id} onClick={() => setEpgSelectedChannel(ch.id)}
+                              className="px-2.5 py-1 rounded-lg text-xs font-medium transition-all whitespace-nowrap shrink-0"
+                              style={{
+                                background: epgSelectedChannel === ch.id ? "rgba(0,212,255,0.15)" : "rgba(255,255,255,0.04)",
+                                border: `1px solid ${epgSelectedChannel === ch.id ? "rgba(0,212,255,0.4)" : "rgba(255,255,255,0.07)"}`,
+                                color: epgSelectedChannel === ch.id ? "#00d4ff" : "rgba(255,255,255,0.5)",
+                              }}>
+                              {ch.name}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Programs list */}
+                    <div className="flex-1 overflow-y-auto px-3 pb-4 space-y-1.5">
+                      {epgSelectedChannel
+                        ? getChannelPrograms(epgSelectedChannel).length === 0
+                          ? (
+                            <div className="flex flex-col items-center justify-center py-10 gap-2">
+                              <Icon name="Calendar" size={24} className="text-muted-foreground/25" />
+                              <p className="text-muted-foreground/40 text-xs text-center">Нет программы на сегодня</p>
+                            </div>
+                          )
+                          : getChannelPrograms(epgSelectedChannel).map((prog) => {
+                              const isCurrent = isCurrentProgram(prog);
+                              const isPast = prog.stop < epgNow;
+                              const progress = getProgramProgress(prog);
+                              return (
+                                <div key={prog.id} className="rounded-xl overflow-hidden transition-all"
+                                  style={{
+                                    background: isCurrent ? "rgba(0,212,255,0.08)" : isPast ? "rgba(255,255,255,0.02)" : "rgba(255,255,255,0.03)",
+                                    border: `1px solid ${isCurrent ? "rgba(0,212,255,0.25)" : "rgba(255,255,255,0.06)"}`,
+                                    opacity: isPast ? 0.5 : 1,
+                                  }}>
+                                  <div className="px-3 py-2.5">
+                                    <div className="flex items-start justify-between gap-2">
+                                      <div className="flex-1 min-w-0">
+                                        <div className="flex items-center gap-1.5 mb-0.5">
+                                          {isCurrent && (
+                                            <span className="w-1.5 h-1.5 rounded-full shrink-0 live-badge"
+                                              style={{ background: "#00d4ff", boxShadow: "0 0 5px #00d4ff" }} />
+                                          )}
+                                          <p className="text-sm font-medium truncate"
+                                            style={{ color: isCurrent ? "#fff" : isPast ? "rgba(255,255,255,0.4)" : "rgba(255,255,255,0.75)" }}>
+                                            {prog.title}
+                                          </p>
+                                        </div>
+                                        {prog.category && (
+                                          <span className="inline-block text-[10px] px-1.5 py-0.5 rounded font-medium mb-1"
+                                            style={{ background: "rgba(155,89,255,0.12)", color: "rgba(155,89,255,0.8)" }}>
+                                            {prog.category}
+                                          </span>
+                                        )}
+                                        {prog.desc && (
+                                          <p className="text-[11px] text-muted-foreground/50 line-clamp-2 leading-relaxed">{prog.desc}</p>
+                                        )}
+                                      </div>
+                                      <div className="text-right shrink-0">
+                                        <p className="text-xs font-rajdhani font-semibold"
+                                          style={{ color: isCurrent ? "#00d4ff" : "rgba(255,255,255,0.35)" }}>
+                                          {formatEpgTime(prog.start)}
+                                        </p>
+                                        <p className="text-[10px] text-muted-foreground/35 font-rajdhani">
+                                          {formatEpgTime(prog.stop)}
+                                        </p>
+                                      </div>
+                                    </div>
+                                    {isCurrent && (
+                                      <div className="mt-2 h-1 rounded-full overflow-hidden"
+                                        style={{ background: "rgba(0,212,255,0.1)" }}>
+                                        <div className="h-full rounded-full transition-all"
+                                          style={{ width: `${progress}%`, background: "linear-gradient(90deg, #00d4ff, #9b59ff)", boxShadow: "0 0 6px rgba(0,212,255,0.6)" }} />
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })
+                        : (
+                          <div className="flex flex-col items-center justify-center py-10 gap-2">
+                            <Icon name="ArrowUp" size={20} className="text-muted-foreground/30" />
+                            <p className="text-muted-foreground/40 text-xs text-center">Выберите канал выше</p>
+                          </div>
+                        )
+                      }
+                    </div>
+                  </div>
                 )}
               </div>
             )}
