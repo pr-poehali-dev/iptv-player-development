@@ -459,6 +459,21 @@ export default function Index() {
     return epgData.programs.find(p => p.channelId === epgId && isCurrentProgram(p)) ?? null;
   }, [epgData, getEpgIdForChannel, isCurrentProgram]);
 
+  // Найти канал плейлиста по EPG-каналу (обратный матчинг)
+  const findPlaylistChannelByEpgId = useCallback((epgChannelId: string): Channel | null => {
+    const normalize = (s: string) => s.toLowerCase().replace(/[^a-zа-яё0-9]/gi, "");
+    const epgCh = epgData?.channels.find(e => e.id === epgChannelId);
+    if (!epgCh) return null;
+    // Сначала по id
+    const byId = allChannels.find(c => c.id === epgChannelId);
+    if (byId) return byId;
+    // Потом по имени
+    const epgNorm = normalize(epgCh.name);
+    return allChannels.find(c => normalize(c.name) === epgNorm)
+      ?? allChannels.find(c => normalize(c.name).includes(epgNorm) || epgNorm.includes(normalize(c.name)))
+      ?? null;
+  }, [epgData, allChannels]);
+
   // ── EPG search ───────────────────────────────────────────────────────────────
   const epgSearchResults = useCallback((): Array<{ program: EpgProgram; channel: EpgChannel }> => {
     if (!epgData || !epgSearch.trim()) return [];
@@ -1068,15 +1083,19 @@ export default function Index() {
                               {text.slice(idx + q.length)}
                             </>;
                           };
+                          const plCh = findPlaylistChannelByEpgId(ch.id);
                           return (
-                            <div key={prog.id} className="rounded-xl overflow-hidden transition-all"
+                            <div key={prog.id}
+                              className="rounded-xl overflow-hidden transition-all group"
                               style={{
                                 background: isCurrent ? "rgba(0,212,255,0.07)" : "rgba(255,255,255,0.03)",
                                 border: `1px solid ${isCurrent ? "rgba(0,212,255,0.2)" : "rgba(255,255,255,0.06)"}`,
                                 opacity: isPast ? 0.55 : 1,
-                              }}>
+                                cursor: plCh ? "pointer" : "default",
+                              }}
+                              onClick={() => { if (plCh) { playChannel(plCh); setTab("channels"); setEpgSearchMode(false); setEpgSearch(""); } }}>
                               <div className="px-3 py-2.5">
-                                {/* Channel name */}
+                                {/* Channel name row */}
                                 <div className="flex items-center gap-1.5 mb-1.5">
                                   <div className="w-1 h-1 rounded-full shrink-0" style={{ background: "#9b59ff" }} />
                                   <span className="text-[10px] font-semibold font-rajdhani tracking-wider truncate"
@@ -1103,9 +1122,21 @@ export default function Index() {
                                     {highlight(prog.desc)}
                                   </p>
                                 )}
-                                <p className="text-[10px] text-muted-foreground/40 font-rajdhani mt-1.5">
-                                  {formatEpgTime(prog.start)} — {formatEpgTime(prog.stop)}
-                                </p>
+                                <div className="flex items-center justify-between mt-1.5 gap-2">
+                                  <p className="text-[10px] text-muted-foreground/40 font-rajdhani">
+                                    {formatEpgTime(prog.start)} — {formatEpgTime(prog.stop)}
+                                  </p>
+                                  {plCh && (
+                                    <span className="flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
+                                      style={{ background: "rgba(0,212,255,0.12)", color: "#00d4ff", border: "1px solid rgba(0,212,255,0.25)" }}>
+                                      <Icon name="Play" size={9} />
+                                      Смотреть
+                                    </span>
+                                  )}
+                                  {!plCh && (
+                                    <span className="text-[10px] text-muted-foreground/25 shrink-0">нет в плейлисте</span>
+                                  )}
+                                </div>
                                 {isCurrent && (
                                   <div className="mt-2 h-0.5 rounded-full overflow-hidden"
                                     style={{ background: "rgba(0,212,255,0.1)" }}>
